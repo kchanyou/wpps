@@ -1,53 +1,20 @@
 # wifi-p2p-streaming
 
-## About the Project 💡
+[한국어](./README.ko.md) | **English**
+<h3> Key Changes </h3>
 
-This project demonstrates how to connect and share camera streaming between Android devices using Wifi-direct and socket. 
+<h4> Registration (Client/Server) — Obtain & Trust P2P IP </h4>
 
-This wraps all framework's Wifi-direct and CameraX APIs and packs into Android library modules for fast and convenient use.
+- Client: call DatagramSocket.connect(serverIp, port) and use socket.localAddress.hostAddress to get the actual routed P2P IP; fall back to WifiManager IP only if needed.
 
-🚀**Technical specification**:
-* Provides separate APKs for both server and client sides.
-* Support peer-to-peer connection via `Wifi-direct`.
-* Data transmission via `Datagram socket (UDP)`.
-* Build with `CameraX` APIs.
-* Support video recording on client side with `AVC(H264)` encoder.
-* Improve performance.
+- Server: if the registration payload is empty or 0.0.0.0, replace it with DatagramPacket.address.hostAddress. Bind listener to 0.0.0.0:CLIENT_INFO_PORT (all interfaces).
 
-🛣️**Upcoming road map**:
-* Add support for other protocols: `Streaming socket (TCP)`, `RTSP (Real Time Streaming Protocol)`.
-* Add streaming quality selections: `SD`, `HD`, `Full HD`.
-* Add support for other encoders: `HEVC(H265)`, `MPEG4`.
+<h4> UDP Streaming Hardening </h4>
 
-## Built on 🛠
-🏭 **[android-core-architecture-lite](https://github.com/anhhn2312/android-core-architecture-lite)**:
-A complete code base that helps to fast build a small app (demo, test) in a modern and high performance way.
+- Frame chunking & reassembly: split each frame into ≤ 60KB chunks. 12-byte header: MAGIC('P2PS',4) | frameId(int32) | totalChunks(int16) | seq(int16) (big-endian). Receiver buffers by frameId and decodes only when complete.
 
-## Sequence diagram ✏️
-<img src="screenshots/sequence-diagram.png" alt="sequence diagram">
+- Single bind & reuse for the receive socket: use DatagramSocket(null), set reuseAddress=true, then bind(0.0.0.0:STREAMING_PORT) once; keep soTimeout=0 (blocking) to avoid rebind loops.
 
-## Screenshots 🖼️
-**Main UI**
+- Accurate decoding: call BitmapFactory.decodeByteArray(dp.data, 0, dp.length) to decode only the received length.
 
-<img src="screenshots/server-main-ui.png" width=280 alt="server-main-ui"> <img src="screenshots/client-main-ui.png" width=280 alt="client-main-ui">
-
-
-**Discover peers and request connection**
-
-<img src="screenshots/client-peer-discovery.png" width=280 alt="client-peer-discovery"> <img src="screenshots/server-incoming-invitation.png" width=280 alt="server-incoming-invitation">
-
-
-**Connection established and streaming**
-
-<img src="screenshots/server-connected.png" width=280 alt="server-connected"> <img src="screenshots/client-connected.png" width=280 alt="client-connected">
-
-
-**Client side settings**
-
-<img src="screenshots/client-quality-selection.png" width=280 alt="client-quality-selection">
-
-**Client recording**
-
-<img src="screenshots/client-recording.png" width=280 alt="client-recording">
-
-
+- Enhanced logging/metrics: counters, byte/chunk sizes, and endpoint IP:PORT for TX/RX.
