@@ -8,23 +8,23 @@ import java.io.File
 
 open class MuxerConfig @JvmOverloads constructor(
     var file: FileOrParcelFileDescriptor,
-    var videoWidth: Int = 1080,
-    var videoHeight: Int = 720,
+    var videoWidth: Int = 2048,
+    var videoHeight: Int = 1080,
     var mimeType: String = MediaFormat.MIMETYPE_VIDEO_AVC,
     var framesPerImage: Int = 1,
     var framesPerSecond: Float = 30F,
-    var bitrate: Int = 10000000,
+    var bitrate: Int = 20000000,
     var frameMuxer: FrameMuxer = Mp4FrameMuxer(file, framesPerSecond),
     var iFrameInterval: Int = 10
 ){
     @JvmOverloads constructor(
         file: File,
-        videoWidth: Int = 1080,
-        videoHeight: Int = 720,
+        videoWidth: Int = 2048,
+        videoHeight: Int = 1080,
         mimeType: String = MediaFormat.MIMETYPE_VIDEO_AVC,
         framesPerImage: Int = 1,
         framesPerSecond: Float = 30F,
-        bitrate: Int = 10000000,
+        bitrate: Int = 20000000,
         frameMuxer: FrameMuxer = Mp4FrameMuxer(file.absolutePath, framesPerSecond),
         iFrameInterval: Int = 10
     ) : this(
