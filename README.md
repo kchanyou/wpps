@@ -1,4 +1,4 @@
-# wifi-p2p-streaming
+# wifi-p2p-streaming-bugfix-version
 
 [한국어](./README.ko.md) | **English**
 <h3> Key Changes </h3>
