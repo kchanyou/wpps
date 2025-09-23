@@ -46,7 +46,7 @@ class UdpStreamingSocket(private val context: Context) : StreamingSocket {
                 socket.send(packet)
 
                 // [수정] 기존 로그에 해상도 정보 추가
-                //Timber.d("Bitmap sent (${data.size} bytes, quality=$COMPRESSION_QUALITY, resolution=$resolution)")
+                Timber.d("Bitmap sent (${data.size} bytes, quality=$COMPRESSION_QUALITY, resolution=$resolution)")
 
                 // [추가] 1초마다 보내는 FPS(Frames Per Second)를 로그로 출력
                 sentFrameCount++
@@ -83,7 +83,7 @@ class UdpStreamingSocket(private val context: Context) : StreamingSocket {
                     val resolution = "${receivedBitmap.width}x${receivedBitmap.height}"
 
                     // [수정] 기존 로그에 해상도 정보 추가
-                    //Timber.d("Bitmap received (${packet.length} bytes, resolution=$resolution)")
+                    Timber.d("Bitmap received (${packet.length} bytes, resolution=$resolution)")
 
                     // [추가] 1초마다 받는 FPS(Frames Per Second)를 로그로 출력
                     receivedFrameCount++
