@@ -103,6 +103,8 @@ class ServerViewModel @Inject constructor(
 
     fun sendCameraFrame(bitmap: Bitmap) {
         // subscribers 목록이 비어있지 않을 때만 전송
+        val timestamp = System.currentTimeMillis()
+        Timber.d("sendCameraFrame: ${bitmap.width}x${bitmap.height} @ $timestamp")
         if (subscribers.isNotEmpty()) {
             Timber.d("sendCameraFrame to: $subscribers")
             for (subscriber in subscribers) {
