@@ -15,27 +15,80 @@ import java.net.*
 
 class UdpStreamingSocket(private val context: Context) : StreamingSocket {
 
-    // [추가] FPS 계산을 위한 변수들
-    private var lastSendTimestamp: Long = 0L
-    private var sentFrameCount: Int = 0
-    private var lastReceiveTimestamp: Long = 0L
-    private var receivedFrameCount: Int = 0
+    private val MAX_UDP_PACKET_SIZE = 50_000
+    private var frameCounter = 0
+    private val FRAME_SKIP = 1
 
-    private val COMPRESSION_QUALITY = 1
-    private val MAX_UDP_PACKET_SIZE = 60_000
-
-    override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) = withContext(Dispatchers.IO) {
-        try {
-            // [추가] 해상도 로그를 위해 비트맵 크기 확인
-            val resolution = "${bitmap.width}x${bitmap.height}"
-
-            val data: ByteArray = bitmapToByteArray(bitmap, COMPRESSION_QUALITY)
-
-            if (data.size > MAX_UDP_PACKET_SIZE) {
-                //Timber.w("Image size too large (${data.size} bytes), skipping frame. Try lowering quality.")
+    override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) =
+        withContext(Dispatchers.IO) {
+            frameCounter++
+            if (frameCounter % FRAME_SKIP != 0) {
                 return@withContext
             }
 
+            try {
+                val originalResolution = "${bitmap.width}x${bitmap.height}"
+
+                // 기존 함수 사용하되 관대한 품질 시도
+                val qualities = when {
+                    bitmap.width >= 1920 -> listOf(12, 10, 8, 6, 4, 2)  // 더 많은 옵션
+                    bitmap.width >= 1280 -> listOf(30, 25, 20, 15, 10, 8)
+                    else -> listOf(50, 40, 30, 25, 20, 15)
+                }
+
+                var sent = false
+
+                for (quality in qualities) {
+                    try {
+                        val data = bitmapToByteArray(bitmap, quality)  // 원래 함수 사용
+                        Timber.d("🔥 Quality $quality: ${data.size} bytes")
+
+                        if (data.size <= MAX_UDP_PACKET_SIZE) {  // 최소 크기 제한 제거
+                            sendPacket(ipAddress, data, originalResolution, quality)
+                            Timber.d("✅ Successfully sent: ${data.size} bytes, quality=$quality")
+                            sent = true
+                            break
+                        }
+                    } catch (e: Exception) {
+                        Timber.w(e, "Quality $quality failed, trying next...")
+                        continue  // 실패해도 다음 품질 시도
+                    }
+                }
+
+                if (!sent) {
+                    // 모든 품질 실패 시 해상도 줄이기
+                    Timber.w("All qualities failed, scaling down resolution")
+                    try {
+                        val scaledBitmap = Bitmap.createScaledBitmap(
+                            bitmap,
+                            bitmap.width / 2,  // 50%로 대폭 축소
+                            bitmap.height / 2,
+                            false
+                        )
+
+                        val scaledData = bitmapToByteArray(scaledBitmap, 20)  // 원래 함수 사용
+                        val scaledResolution = "${scaledBitmap.width}x${scaledBitmap.height}"
+
+                        sendPacket(ipAddress, scaledData, scaledResolution, 20)
+                        scaledBitmap.recycle()
+                        Timber.d("✅ Sent scaled: ${scaledData.size} bytes, resolution=$scaledResolution")
+                    } catch (e: Exception) {
+                        Timber.e(e, "Even scaled version failed")
+                    }
+                }
+
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to send bitmap")
+            }
+        }
+
+    private suspend fun sendPacket(
+        ipAddress: String,
+        data: ByteArray,
+        resolution: String,
+        quality: Int
+    ) {
+        try {
             DatagramSocket().use { socket ->
                 val packet = DatagramPacket(
                     data,
@@ -44,21 +97,10 @@ class UdpStreamingSocket(private val context: Context) : StreamingSocket {
                     Constants.STREAMING_PORT
                 )
                 socket.send(packet)
-
-                // [수정] 기존 로그에 해상도 정보 추가
-                Timber.d("Bitmap sent (${data.size} bytes, quality=$COMPRESSION_QUALITY, resolution=$resolution)")
-
-                // [추가] 1초마다 보내는 FPS(Frames Per Second)를 로그로 출력
-                sentFrameCount++
-                val currentTime = System.currentTimeMillis()
-                if (currentTime - lastSendTimestamp >= 1000) {
-                    //Timber.d("🚀 Sending FPS: $sentFrameCount")
-                    sentFrameCount = 0
-                    lastSendTimestamp = currentTime
-                }
+                Timber.d("📤 Packet sent: ${data.size} bytes, quality=$quality, resolution=$resolution")
             }
         } catch (e: Exception) {
-            Timber.e(e, "Failed to send bitmap")
+            Timber.e(e, "Failed to send packet")
         }
     }
 
@@ -69,41 +111,41 @@ class UdpStreamingSocket(private val context: Context) : StreamingSocket {
         }
 
         val buffer = ByteArray(MAX_UDP_PACKET_SIZE)
-        Timber.d("UDP Receiver started on port ${Constants.STREAMING_PORT}")
+        Timber.d("🔥 UDP Receiver started on port ${Constants.STREAMING_PORT}, buffer size: ${buffer.size}")
 
         try {
             while (true) {
                 val packet = DatagramPacket(buffer, buffer.size)
+                Timber.d("🔥 Waiting for packet...")
+
                 socket.receive(packet)
+                Timber.d("🔥 Packet received: ${packet.length} bytes from ${packet.address?.hostAddress}:${packet.port}")
 
-                val receivedBitmap = BitmapFactory.decodeByteArray(packet.data, 0, packet.length)
+                try {
+                    val receivedBitmap =
+                        BitmapFactory.decodeByteArray(packet.data, 0, packet.length)
 
-                if (receivedBitmap != null) {
-                    // [추가] 해상도 로그를 위해 비트맵 크기 확인
-                    val resolution = "${receivedBitmap.width}x${receivedBitmap.height}"
-
-                    // [수정] 기존 로그에 해상도 정보 추가
-                    Timber.d("Bitmap received (${packet.length} bytes, resolution=$resolution)")
-
-                    // [추가] 1초마다 받는 FPS(Frames Per Second)를 로그로 출력
-                    receivedFrameCount++
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastReceiveTimestamp >= 1000) {
-                        //Timber.d("✅ Receiving FPS: $receivedFrameCount")
-                        receivedFrameCount = 0
-                        lastReceiveTimestamp = currentTime
+                    if (receivedBitmap != null) {
+                        val resolution = "${receivedBitmap.width}x${receivedBitmap.height}"
+                        Timber.d("✅ Client received: ${packet.length} bytes → $resolution")
+                        emit(receivedBitmap)
+                    } else {
+                        Timber.w("❌ Client decode failed: ${packet.length} bytes")
+                        if (packet.length >= 10) {
+                            val header = packet.data.sliceArray(0..9)
+                            Timber.d("🔍 Header: ${header.joinToString(" ") { "%02x".format(it) }}")
+                        }
                     }
-
-                    emit(receivedBitmap)
-                } else {
-                    Timber.w("Failed to decode received bitmap (${packet.length} bytes)")
+                } catch (e: Exception) {
+                    Timber.e(e, "Client decode error: ${packet.length} bytes")
                 }
             }
         } catch (e: Exception) {
-            Timber.e(e, "Error in receive loop")
+            Timber.e(e, "Client receive error")
         } finally {
             socket.close()
-            Timber.d("UDP Receiver stopped.")
+            Timber.d("🔥 Client UDP Receiver stopped")
         }
     }.flowOn(Dispatchers.IO)
 }
+

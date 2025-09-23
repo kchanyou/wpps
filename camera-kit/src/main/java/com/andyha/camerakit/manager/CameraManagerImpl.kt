@@ -94,6 +94,7 @@ class CameraManagerImpl @Inject constructor(
 
         // Preview
         preview = Preview.Builder()
+            // We request aspect ratio but no resolution
             //.setTargetAspectRatio(screenAspectRatio)
             .setTargetResolution(Size(1920, 1080))
             .setTargetRotation(rotation ?: 0)
@@ -113,7 +114,6 @@ class CameraManagerImpl @Inject constructor(
             .setTargetResolution(Size(1920, 1080))
             .setTargetRotation(rotation ?: 0)
             .build()
-            // The analyzer can then be assigned to the instance
             .also {
                 previewFrameAnalyzer = PreviewFrameAnalyzer()
                 it.setAnalyzer(cameraExecutor, previewFrameAnalyzer!!)
