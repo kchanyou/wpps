@@ -1,5 +1,0 @@
-// CameraManagerImpl.kt에서 주석을 해제하고 원하는 해상도 설정
-imageAnalyzer = ImageAnalysis.Builder()
-    .setTargetResolution(Size(2048, 1080))  // 이 줄의 주석을 해제
-    .setTargetRotation(rotation ?: 0)
-    .build()

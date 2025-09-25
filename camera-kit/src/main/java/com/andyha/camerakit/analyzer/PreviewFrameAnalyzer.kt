@@ -24,7 +24,7 @@ class PreviewFrameAnalyzer : ImageAnalysis.Analyzer {
 
     override fun analyze(image: ImageProxy) {
         val bitmap = BitmapUtils.getBitmap(image)
-        Timber.d("Analyze: after getBitmap: ${bitmap?.width} - ${bitmap?.height}")
+        //원본에는 살아있음 Timber.d("Analyze: after getBitmap: ${bitmap?.width} - ${bitmap?.height}")
         bitmap?.let { bitmap -> _output.tryEmit(bitmap) }
         image.close()
     }

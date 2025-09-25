@@ -259,7 +259,7 @@ object FileUtils {
             inbitmap.height / scale, false
         )
         val buffer = ByteArrayOutputStream(bitmap.width * bitmap.height)
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 40, buffer)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, buffer)
         return buffer.toByteArray()
     }
 }
