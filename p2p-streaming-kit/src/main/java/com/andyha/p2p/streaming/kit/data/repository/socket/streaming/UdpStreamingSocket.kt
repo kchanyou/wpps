@@ -31,7 +31,6 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
     @Volatile private var receiveSocket: DatagramSocket? = null
     private val lock = Any()
 
-    // --------- SEND (chunking) ---------
     override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) {
         if (ipAddress.isBlank() || ipAddress == "0.0.0.0") {
             Timber.e("Skip send: invalid subscriber IP '$ipAddress'")
@@ -46,6 +45,11 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
         try {
             DatagramSocket().use { socket ->
+                // 네트워크 최적화 추가
+                socket.setSendBufferSize(128000) // 128KB 송신 버퍼
+                socket.setTrafficClass(0x04) // 최저 지연 우선순위
+                socket.reuseAddress = true
+
                 val addr = InetAddress.getByName(ipAddress)
 
                 var offset = 0
@@ -63,7 +67,9 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
                 }
 
                 sentBitmapCount++
-                Timber.d("Bitmap(frameId=$frameId) sent in $totalChunks chunks, total=${payload.size}B, count=$sentBitmapCount")
+                if (sentBitmapCount % 10 == 0) {
+                    Timber.d("Bitmap(frameId=$frameId) sent in $totalChunks chunks, total=${payload.size}B, count=$sentBitmapCount")
+                }
             }
         } catch (e: Exception) {
             Timber.e(e, "sendBitmap failed (frameId=$frameId, bytes=${payload.size})")
@@ -72,10 +78,13 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
     // --------- RECEIVE (reassembly) ---------
     override suspend fun receiveStreaming(): Flow<Bitmap> = flow {
+        // receiveStreaming()에서 소켓 설정 부분
         val socket = synchronized(lock) {
             receiveSocket ?: DatagramSocket(null).apply {
                 reuseAddress = true
                 soTimeout = 0
+                receiveBufferSize = 256000 // 256KB 수신 버퍼
+                setTrafficClass(0x04) // 최저 지연 우선순위
                 bind(InetSocketAddress(Constants.STREAMING_PORT))
                 receiveSocket = this
                 runCatching {
@@ -123,7 +132,14 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
                 val ready = frames.tryAssemble(frameId)
                 if (ready != null) {
-                    val bmp = BitmapFactory.decodeByteArray(ready, 0, ready.size)
+                    // 디코딩 최적화 옵션 추가
+                    val options = BitmapFactory.Options().apply {
+                        inPreferredConfig = Bitmap.Config.RGB_565 // 메모리 50% 절약
+                        inMutable = false
+                        inSampleSize = 1
+                    }
+
+                    val bmp = BitmapFactory.decodeByteArray(ready, 0, ready.size, options)
                     if (bmp != null) {
                         receivedBitmapCount++
                         Timber.d("Bitmap received (frameId=$frameId, bytes=${ready.size}) count=$receivedBitmapCount from ${dp.address?.hostAddress}:${dp.port}")

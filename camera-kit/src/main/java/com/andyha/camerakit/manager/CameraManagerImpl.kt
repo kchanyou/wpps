@@ -3,6 +3,7 @@ package com.andyha.camerakit.manager
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.view.View
+import android.util.Size
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -42,7 +43,12 @@ class CameraManagerImpl @Inject constructor(
     }
 
     private val cameraExecutor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable).apply {
+                name = "CameraAnalysis"
+                priority = Thread.MAX_PRIORITY // 최고 우선순위
+            }
+        }
     }
 
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -94,30 +100,24 @@ class CameraManagerImpl @Inject constructor(
         // Preview
         preview = Preview.Builder()
             // We request aspect ratio but no resolution
-            .setTargetAspectRatio(screenAspectRatio)
-//            .setTargetResolution(Size(1080, 1920))
+            //.setTargetAspectRatio(screenAspectRatio)
+            .setTargetResolution(Size(1920, 1080))
             .setTargetRotation(rotation ?: 0)
             .build()
 
         // ImageCapture
         imageCapture = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            // We request aspect ratio but no resolution to match preview config, but letting
-            // CameraX optimize for whatever specific resolution best fits our use cases
-            .setTargetAspectRatio(screenAspectRatio)
-            // Set initial target rotation, we will have to call this again if rotation changes
-            // during the lifecycle of this use case
+            //.setTargetAspectRatio(screenAspectRatio)
+            .setTargetResolution(Size(1920, 1080))
             .setTargetRotation(rotation ?: 0)
             .build()
 
         // ImageAnalysis
         imageAnalyzer = ImageAnalysis.Builder()
-            // We request aspect ratio but no resolution
-            .setTargetAspectRatio(screenAspectRatio)
-            // Set initial target rotation, we will have to call this again if rotation changes
-            // during the lifecycle of this use case
+            //.setTargetAspectRatio(screenAspectRatio)
+            .setTargetResolution(Size(1920, 1080))
             .setTargetRotation(rotation ?: 0)
-//            .setTargetResolution(Size(1080, 1920))
             .build()
             // The analyzer can then be assigned to the instance
             .also {
