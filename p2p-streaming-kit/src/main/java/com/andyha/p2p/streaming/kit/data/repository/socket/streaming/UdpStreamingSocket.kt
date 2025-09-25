@@ -6,8 +6,10 @@ import android.graphics.BitmapFactory
 import android.net.wifi.WifiManager
 import com.andyha.coreutils.FileUtils.bitmapToByteArray
 import com.andyha.p2p.streaming.kit.util.Constants
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -16,6 +18,7 @@ import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -31,54 +34,97 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
     @Volatile private var receiveSocket: DatagramSocket? = null
     private val lock = Any()
 
+    // 1번: 메모리 풀링 (단순한 형태)
+    private val byteArrayPool = mutableListOf<ByteArray>()
+    private val poolLock = Any()
+
+    // 3번: 전용 네트워크 스레드
+    private val networkExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable).apply {
+            name = "NetworkThread"
+            priority = Thread.MAX_PRIORITY
+            isDaemon = true
+        }
+    }
+
+    private fun getBorrowedByteArray(size: Int): ByteArray {
+        synchronized(poolLock) {
+            val existing = byteArrayPool.find { it.size >= size }
+            if (existing != null) {
+                byteArrayPool.remove(existing)
+                return existing
+            }
+        }
+        return ByteArray(size)
+    }
+
+    private fun returnByteArray(array: ByteArray) {
+        synchronized(poolLock) {
+            if (byteArrayPool.size < 3) { // 최대 3개만 풀링
+                byteArrayPool.add(array)
+            }
+        }
+    }
+
+    // --------- SEND (chunking) ---------
     override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) {
         if (ipAddress.isBlank() || ipAddress == "0.0.0.0") {
             Timber.e("Skip send: invalid subscriber IP '$ipAddress'")
             return
         }
 
-        val payload: ByteArray = bitmapToByteArray(bitmap, 1)
-        if (payload.isEmpty()) return
+        // 3번: 전용 네트워크 스레드에서 실행
+        withContext(networkExecutor.asCoroutineDispatcher()) {
+            // 원래 압축 방식 유지
+            val payload: ByteArray = bitmapToByteArray(bitmap, 1)
+            if (payload.isEmpty()) return@withContext
 
-        val frameId = nextFrameId++
-        val totalChunks = ceil(payload.size / CHUNK_SIZE.toDouble()).toInt()
+            val frameId = nextFrameId++
+            val totalChunks = ceil(payload.size / CHUNK_SIZE.toDouble()).toInt()
 
-        try {
-            DatagramSocket().use { socket ->
-                // 네트워크 최적화 추가
-                socket.setSendBufferSize(128000) // 128KB 송신 버퍼
-                socket.setTrafficClass(0x04) // 최저 지연 우선순위
-                socket.reuseAddress = true
+            try {
+                DatagramSocket().use { socket ->
+                    // 네트워크 최적화
+                    socket.setSendBufferSize(128000) // 128KB 송신 버퍼
+                    socket.setTrafficClass(0x04) // 최저 지연 우선순위
+                    socket.reuseAddress = true
 
-                val addr = InetAddress.getByName(ipAddress)
+                    val addr = InetAddress.getByName(ipAddress)
 
-                var offset = 0
-                for (seq in 0 until totalChunks) {
-                    val remain = payload.size - offset
-                    val take = min(remain, CHUNK_SIZE)
-                    val header = buildHeader(frameId, totalChunks, seq)
-                    val packetBytes = ByteArray(header.size + take)
-                    System.arraycopy(header, 0, packetBytes, 0, header.size)
-                    System.arraycopy(payload, offset, packetBytes, header.size, take)
-                    offset += take
+                    var offset = 0
+                    for (seq in 0 until totalChunks) {
+                        val remain = payload.size - offset
+                        val take = min(remain, CHUNK_SIZE)
+                        val header = buildHeader(frameId, totalChunks, seq)
 
-                    val packet = DatagramPacket(packetBytes, packetBytes.size, addr, Constants.STREAMING_PORT)
-                    socket.send(packet)
+                        // 1번: 풀링된 배열 사용
+                        val packetBytes = getBorrowedByteArray(header.size + take)
+                        try {
+                            System.arraycopy(header, 0, packetBytes, 0, header.size)
+                            System.arraycopy(payload, offset, packetBytes, header.size, take)
+                            offset += take
+
+                            val packet = DatagramPacket(packetBytes, header.size + take, addr, Constants.STREAMING_PORT)
+                            socket.send(packet)
+                        } finally {
+                            // 1번: 배열 반환
+                            returnByteArray(packetBytes)
+                        }
+                    }
+
+                    sentBitmapCount++
+                    if (sentBitmapCount % 10 == 0) { // 로그 빈도 줄이기
+                        Timber.d("Bitmap(frameId=$frameId) sent in $totalChunks chunks, total=${payload.size}B, count=$sentBitmapCount")
+                    }
                 }
-
-                sentBitmapCount++
-                if (sentBitmapCount % 10 == 0) {
-                    Timber.d("Bitmap(frameId=$frameId) sent in $totalChunks chunks, total=${payload.size}B, count=$sentBitmapCount")
-                }
+            } catch (e: Exception) {
+                Timber.e(e, "sendBitmap failed (frameId=$frameId, bytes=${payload.size})")
             }
-        } catch (e: Exception) {
-            Timber.e(e, "sendBitmap failed (frameId=$frameId, bytes=${payload.size})")
         }
     }
 
     // --------- RECEIVE (reassembly) ---------
     override suspend fun receiveStreaming(): Flow<Bitmap> = flow {
-        // receiveStreaming()에서 소켓 설정 부분
         val socket = synchronized(lock) {
             receiveSocket ?: DatagramSocket(null).apply {
                 reuseAddress = true
@@ -99,6 +145,13 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
         val buf = ByteArray(MAX_UDP_PACKET)
         val frames = ReassemblyTable()
+
+        // 디코딩 최적화 옵션
+        val bitmapOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.RGB_565 // 메모리 50% 절약
+            inMutable = false
+            inSampleSize = 1
+        }
 
         try {
             while (true) {
@@ -132,17 +185,13 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
                 val ready = frames.tryAssemble(frameId)
                 if (ready != null) {
-                    // 디코딩 최적화 옵션 추가
-                    val options = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565 // 메모리 50% 절약
-                        inMutable = false
-                        inSampleSize = 1
-                    }
-
-                    val bmp = BitmapFactory.decodeByteArray(ready, 0, ready.size, options)
+                    // 최적화된 디코딩
+                    val bmp = BitmapFactory.decodeByteArray(ready, 0, ready.size, bitmapOptions)
                     if (bmp != null) {
                         receivedBitmapCount++
-                        Timber.d("Bitmap received (frameId=$frameId, bytes=${ready.size}) count=$receivedBitmapCount from ${dp.address?.hostAddress}:${dp.port}")
+                        if (receivedBitmapCount % 10 == 0) { // 로그 빈도 줄이기
+                            Timber.d("Bitmap received (frameId=$frameId, bytes=${ready.size}) count=$receivedBitmapCount from ${dp.address?.hostAddress}:${dp.port}")
+                        }
                         emit(bmp)
                     } else {
                         Timber.w("BitmapFactory returned null (frameId=$frameId, bytes=${ready.size})")
@@ -161,6 +210,8 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
                 if (receiveSocket === socket) receiveSocket = null
                 Timber.d("UDP receive socket closed")
             }
+            // 스레드 정리
+            networkExecutor.shutdown()
         }
     }
 
