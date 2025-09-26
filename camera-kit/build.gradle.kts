@@ -59,6 +59,7 @@ dependencies {
     implementation(project(path = Modules.CORE_EXTENSION))
     implementation(project(path = Modules.CORE_UTILS))
     implementation(project(path = Modules.CORE_DATA))
+    implementation(project(":p2p-streaming-kit"))
 
     implementations(ProjectDependencies.coreUI)
     implementations(ProjectDependencies.di)

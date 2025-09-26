@@ -4,11 +4,13 @@ import android.graphics.Bitmap
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import com.andyha.camerakit.processor.FramePipelineProcessor
 import com.andyha.camerakit.utils.BitmapUtils
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import timber.log.Timber
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -36,87 +38,21 @@ class PreviewFrameAnalyzer : ImageAnalysis.Analyzer {
     private var maxProcessingTime = 0L
     private var minProcessingTime = Long.MAX_VALUE
 
-    @ExperimentalGetImage
+    private val imageQueue = LinkedBlockingQueue<ImageProxy>(2)
+    private val pipelineProcessor = FramePipelineProcessor()
+
     override fun analyze(image: ImageProxy) {
-        val currentTime = System.currentTimeMillis()
-
-        try {
-            // 1차: 엄격한 30 FPS 제한 체크 (가장 먼저)
-            if (currentTime - lastProcessTime < TARGET_FPS_INTERVAL) {
-                fpsDroppedCount.incrementAndGet()
-                return // 즉시 드롭 (finally에서 close됨)
-            }
-
-            // 2차: 이미 처리 중이면 즉시 드롭
-            if (!isProcessing.compareAndSet(false, true)) {
-                busyDroppedCount.incrementAndGet()
-                return // 즉시 드롭
-            }
-
-            // 실제 처리 시작
-            val processingStartTime = System.currentTimeMillis()
-
-            try {
-                // 비트맵 변환
-                val bitmap = BitmapUtils.getBitmap(image)
-
-                if (bitmap != null) {
-                    // 성공적으로 처리됨
-                    val success = _output.tryEmit(bitmap)
-
-                    if (success) {
-                        val processingTime = System.currentTimeMillis() - processingStartTime
-
-                        // 통계 업데이트
-                        processedCount.incrementAndGet()
-                        totalProcessingTime += processingTime
-                        maxProcessingTime = maxOf(maxProcessingTime, processingTime)
-                        minProcessingTime = minOf(minProcessingTime, processingTime)
-                        lastProcessTime = currentTime
-
-                        // 느린 처리 경고 (40ms 초과)
-                        if (processingTime > 40) {
-                            Timber.w("SLOW FRAME PROCESSING: ${processingTime}ms (${image.width}x${image.height})")
-                        }
-
-                    } else {
-                        // emit 실패
-                        bitmap.recycle() // 메모리 누수 방지
-                        errorCount.incrementAndGet()
-                        Timber.w("Failed to emit bitmap to flow")
-                    }
-                } else {
-                    // 비트맵 변환 실패
-                    errorCount.incrementAndGet()
-                }
-
-            } catch (e: Exception) {
-                Timber.e(e, "Frame processing error")
-                errorCount.incrementAndGet()
-            }
-
-            // 통계 출력 (3초마다)
-            if (currentTime - lastStatsTime >= 3000) {
-                logPerformanceStats()
-                resetStats()
-                lastStatsTime = currentTime
-            }
-
-        } catch (e: Exception) {
-            Timber.e(e, "Critical frame analysis error")
-            errorCount.incrementAndGet()
-        } finally {
-            // 절대적으로 보장되는 리소스 해제
-            try {
-                image.close()
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to close ImageProxy")
-            }
-
-            // 처리 플래그 해제
-            isProcessing.set(false)
+        // 큐가 가득 차면 이전 프레임 드롭
+        if (!imageQueue.offer(image)) {
+            imageQueue.poll()?.close() // 드롭
+            imageQueue.offer(image)
         }
     }
+
+    init {
+        pipelineProcessor.startProcessing(imageQueue, _output)
+    }
+
 
     private fun logPerformanceStats() {
         val processed = processedCount.get()

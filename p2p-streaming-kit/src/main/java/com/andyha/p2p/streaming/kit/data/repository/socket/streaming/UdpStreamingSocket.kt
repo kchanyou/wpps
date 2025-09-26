@@ -34,11 +34,7 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
     @Volatile private var receiveSocket: DatagramSocket? = null
     private val lock = Any()
 
-    // 1번: 메모리 풀링 (단순한 형태)
-    private val byteArrayPool = mutableListOf<ByteArray>()
-    private val poolLock = Any()
-
-    // 3번: 전용 네트워크 스레드
+    // 네트워크 전용 고우선 스레드풀
     private val networkExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable).apply {
             name = "NetworkThread"
@@ -47,90 +43,58 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
         }
     }
 
-    private fun getBorrowedByteArray(size: Int): ByteArray {
-        synchronized(poolLock) {
-            val existing = byteArrayPool.find { it.size >= size }
-            if (existing != null) {
-                byteArrayPool.remove(existing)
-                return existing
-            }
-        }
-        return ByteArray(size)
-    }
+    // ========== 기존 sendBitmap 제거 ==========
 
-    private fun returnByteArray(array: ByteArray) {
-        synchronized(poolLock) {
-            if (byteArrayPool.size < 3) { // 최대 3개만 풀링
-                byteArrayPool.add(array)
-            }
-        }
-    }
-
-    // --------- SEND (chunking) ---------
-    override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) {
+    // 새로운 메서드: 이미 인코딩된 데이터만 청킹 전송
+    suspend fun sendEncodedData(ipAddress: String, encodedData: ByteArray) {
         if (ipAddress.isBlank() || ipAddress == "0.0.0.0") {
             Timber.e("Skip send: invalid subscriber IP '$ipAddress'")
             return
         }
 
-        // 3번: 전용 네트워크 스레드에서 실행
         withContext(networkExecutor.asCoroutineDispatcher()) {
-            // 원래 압축 방식 유지
-            val payload: ByteArray = bitmapToByteArray(bitmap, 1)
-            if (payload.isEmpty()) return@withContext
-
             val frameId = nextFrameId++
-            val totalChunks = ceil(payload.size / CHUNK_SIZE.toDouble()).toInt()
-
+            val totalChunks = ceil(encodedData.size / CHUNK_SIZE.toDouble()).toInt()
             try {
                 DatagramSocket().use { socket ->
-                    // 네트워크 최적화
-                    socket.setSendBufferSize(128000) // 128KB 송신 버퍼
-                    socket.setTrafficClass(0x04) // 최저 지연 우선순위
+                    socket.setSendBufferSize(128000)
+                    socket.setTrafficClass(0x04)
                     socket.reuseAddress = true
 
                     val addr = InetAddress.getByName(ipAddress)
 
                     var offset = 0
                     for (seq in 0 until totalChunks) {
-                        val remain = payload.size - offset
+                        val remain = encodedData.size - offset
                         val take = min(remain, CHUNK_SIZE)
                         val header = buildHeader(frameId, totalChunks, seq)
+                        val packetBytes = ByteArray(header.size + take)
+                        System.arraycopy(header, 0, packetBytes, 0, header.size)
+                        System.arraycopy(encodedData, offset, packetBytes, header.size, take)
+                        offset += take
 
-                        // 1번: 풀링된 배열 사용
-                        val packetBytes = getBorrowedByteArray(header.size + take)
-                        try {
-                            System.arraycopy(header, 0, packetBytes, 0, header.size)
-                            System.arraycopy(payload, offset, packetBytes, header.size, take)
-                            offset += take
-
-                            val packet = DatagramPacket(packetBytes, header.size + take, addr, Constants.STREAMING_PORT)
-                            socket.send(packet)
-                        } finally {
-                            // 1번: 배열 반환
-                            returnByteArray(packetBytes)
-                        }
+                        val packet = DatagramPacket(packetBytes, packetBytes.size, addr, Constants.STREAMING_PORT)
+                        socket.send(packet)
                     }
-
                     sentBitmapCount++
-                    if (sentBitmapCount % 10 == 0) { // 로그 빈도 줄이기
-                        Timber.d("Bitmap(frameId=$frameId) sent in $totalChunks chunks, total=${payload.size}B, count=$sentBitmapCount")
+                    if (sentBitmapCount % 10 == 0) {
+                        Timber.d("Encoded(frameId=$frameId) sent in $totalChunks chunks, total=${encodedData.size}B, count=$sentBitmapCount")
                     }
                 }
             } catch (e: Exception) {
-                Timber.e(e, "sendBitmap failed (frameId=$frameId, bytes=${payload.size})")
+                Timber.e(e, "sendEncodedData failed (frameId=$frameId, bytes=${encodedData.size})")
             }
         }
     }
 
-    // --------- RECEIVE (reassembly) ---------
+    // --------- RECEIVE (reassembly, 기존과 동일) ---------
     override suspend fun receiveStreaming(): Flow<Bitmap> = flow {
         val socket = synchronized(lock) {
             receiveSocket ?: DatagramSocket(null).apply {
                 reuseAddress = true
                 soTimeout = 0
-                receiveBufferSize = 256000 // 256KB 수신 버퍼
-                setTrafficClass(0x04) // 최저 지연 우선순위
+                receiveBufferSize = 256000
+                setTrafficClass(0x04)
                 bind(InetSocketAddress(Constants.STREAMING_PORT))
                 receiveSocket = this
                 runCatching {
@@ -146,9 +110,8 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
         val buf = ByteArray(MAX_UDP_PACKET)
         val frames = ReassemblyTable()
 
-        // 디코딩 최적화 옵션
         val bitmapOptions = BitmapFactory.Options().apply {
-            inPreferredConfig = Bitmap.Config.RGB_565 // 메모리 50% 절약
+            inPreferredConfig = Bitmap.Config.RGB_565
             inMutable = false
             inSampleSize = 1
         }
@@ -158,7 +121,6 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
                 val dp = DatagramPacket(buf, buf.size)
                 socket.receive(dp)
 
-                // 최소 헤더 길이 검사
                 if (dp.length < HEADER_SIZE) {
                     Timber.w("Drop packet: too small (${dp.length})")
                     continue
@@ -185,11 +147,10 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
 
                 val ready = frames.tryAssemble(frameId)
                 if (ready != null) {
-                    // 최적화된 디코딩
                     val bmp = BitmapFactory.decodeByteArray(ready, 0, ready.size, bitmapOptions)
                     if (bmp != null) {
                         receivedBitmapCount++
-                        if (receivedBitmapCount % 10 == 0) { // 로그 빈도 줄이기
+                        if (receivedBitmapCount % 10 == 0) {
                             Timber.d("Bitmap received (frameId=$frameId, bytes=${ready.size}) count=$receivedBitmapCount from ${dp.address?.hostAddress}:${dp.port}")
                         }
                         emit(bmp)
@@ -210,8 +171,36 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
                 if (receiveSocket === socket) receiveSocket = null
                 Timber.d("UDP receive socket closed")
             }
-            // 스레드 정리
             networkExecutor.shutdown()
+        }
+    }
+
+    override suspend fun sendBitmap(ipAddress: String, bitmap: Bitmap) {
+        // 안전성 체크
+        if (bitmap.isRecycled) {
+            Timber.w("Skip sending: bitmap already recycled")
+            return
+        }
+
+        var shouldRecycle = false
+        try {
+            val data = bitmapToByteArray(bitmap, 1)
+            shouldRecycle = true // 성공했으면 recycle 예약
+            sendEncodedData(ipAddress, data)
+        } catch (e: IllegalArgumentException) {
+            if (e.message?.contains("recycled") == true) {
+                Timber.w("Bitmap was recycled during processing")
+            } else {
+                Timber.e(e, "Failed to convert bitmap")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to send bitmap")
+            shouldRecycle = true // 다른 예외여도 정리는 해야함
+        } finally {
+            // 안전하게 recycle
+            if (shouldRecycle && !bitmap.isRecycled) {
+                bitmap.recycle()
+            }
         }
     }
 
@@ -238,7 +227,6 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
         fun putChunk(frameId: Int, total: Int, seq: Int, data: ByteArray, offset: Int, length: Int) {
             val e = map.getOrPut(frameId) { Entry(total, arrayOfNulls(total), 0) }
             if (e.total != total) {
-                // 프레임 총 조각 수가 다르면 새로 시작
                 map[frameId] = Entry(total, arrayOfNulls(total), 0)
             }
             if (e.chunks[seq] == null) {
@@ -252,7 +240,6 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
         fun tryAssemble(frameId: Int): ByteArray? {
             val e = map[frameId] ?: return null
             if (e.received != e.total) return null
-            // 모두 도착 → 합치기
             val totalSize = e.chunks.sumOf { it?.size ?: 0 }
             val out = ByteArray(totalSize)
             var pos = 0
@@ -275,15 +262,22 @@ class UdpStreamingSocket(context: Context) : StreamingSocket {
     }
 
     companion object {
-        // UDP datagram 실한계(65507)보다 여유 두고 60KB로 분할
+        // UDP datagram (65507)보다 여유 두고
         private const val CHUNK_SIZE = 60_000
-        // 수신 버퍼는 여유있게 (조각 + 헤더)
         private const val MAX_UDP_PACKET = CHUNK_SIZE + 64
-
-        // 헤더: MAGIC(4) + frameId(4) + total(2) + seq(2) = 12 bytes
         private const val HEADER_SIZE = 12
         private const val MAGIC = 0x50325053 // 'P2PS'
-        // 미완성 프레임 정리 타임아웃
         private const val STALE_MS = 2_000L
+
+        // NetworkManager에서 호출될 수 있도록 정적 메서드 추가
+        private var instance: UdpStreamingSocket? = null
+
+        fun initialize(context: Context) {
+            instance = UdpStreamingSocket(context)
+        }
+
+        suspend fun sendData(ipAddress: String, data: ByteArray) {
+            instance?.sendEncodedData(ipAddress, data)
+        }
     }
 }
